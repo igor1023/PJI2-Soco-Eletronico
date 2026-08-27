@@ -1,2 +1,9 @@
 # PJI2-Soco-Eletronico
-Armazenamento de códigos para funções do ESP32.
+
+
+# Alunos: Igor da Silva e Tiado Cargnin Morandi.
+
+
+Repositório da disciplina de Projeto Integrador II.
+Para armazenamento de códigos/testes para funções do ESP32.
+Desenvolvimento de um soco eletrônico.
