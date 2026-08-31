@@ -22,3 +22,28 @@ Desenvolvimento de um soco eletrônico a ser implantado na feira de jogos do IFS
 
 - 3.V3 <---> FSR <---> NÓ_A <---> Potenciometro (2k2) <---> GND
 - NÓ_A <---> PIN 34
+
+
+# Pinagem do adaptador de cartão microSD (verificar):
+
+- CS => PIN 4;
+- SCK => PIN 18;
+- MOSI => PIN 23;
+- MISO => PIN 19;
+- VCC => 3V3;
+- GND => GND.
+
+# Dependências para instalar na IDE do arduíno:
+
+## Boards Managar:
+
+- Esp32 by Espressif Systems
+
+
+## Bibliotecas:
+
+- MD_MAX72XX by majicDesigns
+
+## Boards:
+
+- ESP32 DEV MODULE
