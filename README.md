@@ -20,7 +20,7 @@ Desenvolvimento de um soco eletrônico a ser implantado na feira de jogos do IFS
 
 # Pinagem do circuito Divisor de Tensão:
 
-- 3.V3 <---> FSR <---> NÓ_A <---> Potenciometro (2k2) <---> GND
+- 3V3 <---> FSR <---> NÓ_A <---> Potenciometro (2k2) <---> GND
 - NÓ_A <---> PIN 34
 
 
