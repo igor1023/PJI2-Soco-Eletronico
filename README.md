@@ -30,7 +30,7 @@ Desenvolvimento de um soco eletrônico a ser implantado na feira de jogos do IFS
 - SCK => PIN 18;
 - MOSI => PIN 23;
 - MISO => PIN 19;
-- VCC => 3V3;
+- VCC => VIN (3V3 não funcionou);
 - GND => GND.
 
 # Dependências para instalar na IDE do arduíno:
