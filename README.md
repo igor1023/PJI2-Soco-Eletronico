@@ -24,7 +24,7 @@ Desenvolvimento de um soco eletrônico a ser implantado na feira de jogos do IFS
 - NÓ_A <---> PIN 34
 
 
-# Pinagem do adaptador de cartão microSD (verificar):
+# Pinagem do adaptador de cartão microSD:
 
 - CS => PIN 4;
 - SCK => PIN 18;
