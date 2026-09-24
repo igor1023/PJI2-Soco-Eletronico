@@ -1,421 +1,299 @@
-// Código para ler 3 socos e imprimir as respectivas pontuacoes
-// na matriz MAX7219
-// uso de maquina de estados
+// ============================================================
+// SOCO ELETRÔNICO - ESP32 + FSR + Matriz MAX7219
+// 3 socos -> dano de cada um -> maior dano exibido no final
+// Máquina de estados 100% não-bloqueante (sem delay)
+// ============================================================
 
 #include <MD_MAX72xx.h>
 #include <SPI.h>
 
-// ========== configuracao da matriz ============
+// ===================== CONFIGURAÇÕES ========================
 
-#define IMMEDIATE_NEW   1     // if 1 will immediately display a new message
-#define USE_POT_CONTROL 0
-#define PRINT_CALLBACK  0
-
-#define PRINT(s, v) { Serial.print(F(s)); Serial.print(v); }
-
-// Define the number of devices we have in the chain and the hardware interface
-// NOTE: These pin numbers will probably not work with your hardware and may
-// need to be adapted
-//#define HARDWARE_TYPE MD_MAX72XX::PAROLA_HW
+// ---- Matriz ----
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES 4
+#define MAX_DEVICES   4
+#define CS_PIN        5           // CLK=18 e DIN=23 (SPI de hardware)
+#define BRILHO        5           // 0..15
+#define SCROLL_DELAY  45          // ms por coluna (menor = mais rápido)
+#define CHAR_SPACING  1           // colunas entre caracteres
+#define BUF_SIZE      48
 
-#define CLK_PIN   18  // or SCK
-#define DATA_PIN  23  // or MOSI
-#define CS_PIN    5  // or SS
+// ---- Sensor ----
+#define SENSOR_PIN            34
+#define ADC_MAX               4095
+#define LIMIAR_IMPACTO        500   // valor bruto que caracteriza um soco
+#define LEITURAS_CONFIRMACAO  2     // leituras seguidas acima do limiar (filtra ruído)
+#define TEMPO_FIM_IMPACTO     100   // ms abaixo do limiar => soco terminou
 
-// SPI hardware interface
-MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
-// Arbitrary pins
-//MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
+// ---- Jogo ----
+#define TOTAL_TENTATIVAS  3
+#define TEMPO_PREPARACAO  7000      // ms com FSR ignorado (tempo p/ "Prepare-se x/3" rolar inteiro)
+#define TEMPO_LIMITE_SOCO 15000     // ms esperando o soco (senão valor = 0)
+#define TEMPO_RESULTADO   5250      // ms mostrando "Soco i: v v v" (rola inteiro)
+#define TEMPO_REINICIO    30000     // ms no FINALIZADO até reiniciar sozinho
+#define BOTAO_PIN         27        // botão p/ novo jogo (para GND, pull-up interno)
+#define DEBOUNCE_MS       40
 
-// =========== configuracao de scrolling ==============
+// ========================= TIPOS ============================
 
-#if USE_POT_CONTROL
-#define SPEED_IN  34
-#else
-#define SCROLL_DELAY  75  // in milliseconds
-#endif // USE_POT_CONTROL
-
-#define CHAR_SPACING  1 // pixels between characters
-
-// Global message buffers shared by Serial and Scrolling functions
-#define BUF_SIZE  75
-uint8_t curMessage[BUF_SIZE] = { "Sua vez! " };
-uint8_t newMessage[BUF_SIZE];
-bool newMessageAvailable = false;
-
-uint16_t  scrollDelay;  // in milliseconds
-
-// ================== configuracao do FSR ===================
-#define SENSOR 34
-#define LIMIAR_IMPACTO 500
-#define TEMPO_FIM_IMPACTO 100
-
-bool emImpacto = false;
-int maiorImpacto = 0;
-uint32_t ultimoImpacto = 0;
-
-// ================= configuracao do jogo =====================
-#define TOTAL_TENTATIVAS 3
-
-// tempo mostrando "Tentativa i" ou "Vai, sua vez" antes de liberar o soco
-#define TEMPO_PREPARACAO 2000
-
-// tempo mostrando o resultado antes de liberar a prox tentativa
-#define TEMPO_RESULTADO 10000
-
-enum EstadoJogo{
+enum class Estado : uint8_t {
   PREPARANDO,
   MEDINDO,
   MOSTRANDO_RESULTADO,
   FINALIZADO
 };
 
-EstadoJogo estadoJogo = PREPARANDO;
-int tentativaAtual = 0;
-int pontos[TOTAL_TENTATIVAS] = {0,0,0};
-uint32_t tempoEstado = 0;
+struct Jogo {
+  Estado   estado = Estado::PREPARANDO;
+  uint8_t  tentativa = 0;                    // 1..TOTAL_TENTATIVAS
+  uint16_t dano[TOTAL_TENTATIVAS] = {0};
+  uint16_t melhor = 0;
+  uint32_t tEstado = 0;                      // instante em que entrou no estado
+} jogo;
 
-void mostrarMensagem(const char *mensagem){
-  snprintf((char*)newMessage, BUF_SIZE, "%s  ", mensagem);
+struct Impacto {
+  bool     ativo = false;
+  uint16_t pico = 0;
+  uint8_t  confirmacoes = 0;
+  uint32_t tUltimoAcima = 0;
+} impacto;
 
+// ======================== DISPLAY ===========================
+
+MD_MAX72XX mx(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
+
+uint8_t curMessage[BUF_SIZE] = "  ";
+uint8_t newMessage[BUF_SIZE];
+bool    newMessageAvailable = false;
+
+// Único ponto de entrada para trocar o texto exibido
+void exibir(const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf((char *)newMessage, BUF_SIZE - 3, fmt, args);
+  va_end(args);
+  strcat((char *)newMessage, "   ");        // espaço entre repetições
   newMessageAvailable = true;
 }
 
-void mostrarPontuacao(int valor)
-{
-  snprintf((char*)newMessage, BUF_SIZE, "Sua pontuacao: %d   ", valor);
-  newMessageAvailable = true;
-}
+void scrollDataSink(uint8_t dev, MD_MAX72XX::transformType_t t, uint8_t col) {}
 
-// ao final das jogadas
-void mostrarTodosPontos(){
-  snprintf((char*)newMessage, BUF_SIZE, "Pontos: %d %d %d  ",
-           pontos[0], pontos[1], pontos[2]);
-
-  newMessageAvailable = true;
-}
-
-// ==============================================================
-
-void readSerial(void)
-{
-  static uint8_t  putIndex = 0;
-
-  while (Serial.available())
-  {
-    newMessage[putIndex] = (char)Serial.read();
-    if ((newMessage[putIndex] == '\n') || (putIndex >= BUF_SIZE-3)) // end of message character or full buffer
-    {
-      // put in a message separator and end the string
-      newMessage[putIndex++] = ' ';
-      newMessage[putIndex] = '\0';
-      // restart the index for next filling spree and flag we have a message waiting
-      putIndex = 0;
-      newMessageAvailable = true;
-    }
-    else if (newMessage[putIndex] != '\r')
-      // Just save the next char in next location
-      putIndex++;
-  }
-}
-
-void scrollDataSink(uint8_t dev, MD_MAX72XX::transformType_t t, uint8_t col)
-// Callback function for data that is being scrolled off the display
-{
-#if PRINT_CALLBACK
-  Serial.print("\n cb ");
-  Serial.print(dev);
-  Serial.print(' ');
-  Serial.print(t);
-  Serial.print(' ');
-  Serial.println(col);
-#endif
-}
-
-uint8_t scrollDataSource(uint8_t dev, MD_MAX72XX::transformType_t t)
-// Callback function for data that is required for scrolling into the display
-{
-  static uint8_t* p = curMessage;
+// Callback: fornece a próxima coluna de pixels ao scroll
+uint8_t scrollDataSource(uint8_t dev, MD_MAX72XX::transformType_t t) {
+  static uint8_t *p = curMessage;
   static enum { NEW_MESSAGE, LOAD_CHAR, SHOW_CHAR, BETWEEN_CHAR } state = LOAD_CHAR;
-  static uint8_t  curLen, showLen;
-  static uint8_t  cBuf[15];
-  uint8_t colData = 0;    // blank column is the default
+  static uint8_t curLen, showLen;
+  static uint8_t cBuf[15];
+  uint8_t colData = 0;
 
-#if IMMEDIATE_NEW
-  if (newMessageAvailable)  // there is a new message waiting
-  {
+  if (newMessageAvailable) {                // troca imediata de mensagem
     state = NEW_MESSAGE;
-    mx.clear(); // clear the display
+    mx.clear();
   }
-#endif
 
-  // finite state machine to control what we do on the callback
-  switch(state)
-  {
-    case NEW_MESSAGE:   // Load the new message
-      memcpy(curMessage, newMessage, BUF_SIZE); // copy it in
-      newMessageAvailable = false;    // used it!
+  switch (state) {
+    case NEW_MESSAGE:
+      memcpy(curMessage, newMessage, BUF_SIZE);
+      newMessageAvailable = false;
       p = curMessage;
       state = LOAD_CHAR;
       break;
 
-    case LOAD_CHAR: // Load the next character from the font table
-      showLen = mx.getChar(*p++, sizeof(cBuf)/sizeof(cBuf[0]), cBuf);
+    case LOAD_CHAR:
+      showLen = mx.getChar(*p++, sizeof(cBuf), cBuf);
       curLen = 0;
       state = SHOW_CHAR;
+      if (*p == '\0') p = curMessage;       // fim: recomeça a mensagem
+      // fall through
 
-      // if we reached end of message, opportunity to load the next
-      if (*p == '\0')
-      {
-        p = curMessage;     // reset the pointer to start of message
-#if !IMMEDIATE_NEW
-        if (newMessageAvailable)  // there is a new message waiting
-        {
-          state = NEW_MESSAGE;    // we will load it here
-          break;
-        }
-#endif
-      }
-      // !! deliberately fall through to next state to start displaying
-
-    case SHOW_CHAR: // display the next part of the character
+    case SHOW_CHAR:
       colData = cBuf[curLen++];
-      if (curLen == showLen)
-      {
+      if (curLen == showLen) {
         showLen = CHAR_SPACING;
         curLen = 0;
         state = BETWEEN_CHAR;
       }
       break;
 
-    case BETWEEN_CHAR: // display inter-character spacing (blank columns)
+    case BETWEEN_CHAR:
       colData = 0;
-      curLen++;
-      if (curLen == showLen)
-        state = LOAD_CHAR;
+      if (++curLen == showLen) state = LOAD_CHAR;
       break;
 
     default:
       state = LOAD_CHAR;
   }
-
-  return(colData);
+  return colData;
 }
 
-// atualiza o scrolling
- void scrollText(void)
-{
-  static uint32_t prevTime = 0;
-
-  // Is it time to scroll the text?
-  if (millis()-prevTime >= scrollDelay)
-  {
-    mx.transform(MD_MAX72XX::TSL);  // scroll along - the callback will load all the data
-    //mx.transform(MD_MAX72XX::TSR); // para mudar fluxo de dados
-    prevTime = millis();      // starting point for next time
+void atualizarScroll() {
+  static uint32_t prev = 0;
+  uint32_t agora = millis();
+  if (agora - prev >= SCROLL_DELAY) {
+    mx.transform(MD_MAX72XX::TSL);
+    prev = agora;
   }
 }
 
-// velocidade do scrolling
-uint16_t getScrollDelay(void)
-{
-#if USE_POT_CONTROL
-  uint16_t  t;
+// ======================== BOTÃO =============================
 
-  t = analogRead(SPEED_IN);
-  t = map(t, 0, 1023, 25, 250);
+// Retorna true uma única vez por clique (com debounce)
+bool botaoPressionado() {
+  static bool estavaPressionado = false;
+  static uint32_t tMudanca = 0;
+  bool lido = (digitalRead(BOTAO_PIN) == LOW);
+  uint32_t agora = millis();
 
-  return(t);
-#else
-  return(SCROLL_DELAY);
-#endif
+  if (lido != estavaPressionado && agora - tMudanca >= DEBOUNCE_MS) {
+    tMudanca = agora;
+    estavaPressionado = lido;
+    return lido;
+  }
+  return false;
 }
 
-// ========= preparar nova tentativa ==============
-void iniciarTentativa(){
+// ======================== SENSOR ============================
 
-  tentativaAtual++;
-  Serial.println();
-  Serial.print("========== TENTATIVA ");
-  Serial.print(tentativaAtual);
-  Serial.println(" ==========");
-
-  char mensagem[BUF_SIZE];
-
-  snprintf(mensagem, BUF_SIZE, "Tentativa %d - Liberado!", tentativaAtual);
-
-  mostrarMensagem(mensagem);
-  tempoEstado = millis();
-  estadoJogo = PREPARANDO;
-
+void resetarImpacto() {
+  impacto = Impacto();
 }
 
-// ============ Finalizar Impacto ============
-void finalizarImpacto(){
-  emImpacto = false; // nao está mais lendo soco
+// Processa uma leitura. Retorna true quando um soco acabou de terminar
+// (o pico fica em impacto.pico).
+bool processarSensor() {
+  uint16_t valor = analogRead(SENSOR_PIN);
+  uint32_t agora = millis();
 
-  pontos[tentativaAtual - 1] = maiorImpacto;
+  if (valor > LIMIAR_IMPACTO) {
+    impacto.tUltimoAcima = agora;
+    if (!impacto.ativo) {
+      if (++impacto.confirmacoes >= LEITURAS_CONFIRMACAO) {
+        impacto.ativo = true;
+        impacto.pico = valor;
+        Serial.println(">>> Impacto detectado");
+      }
+    } else if (valor > impacto.pico) {
+      impacto.pico = valor;
+    }
+  } else if (!impacto.ativo) {
+    impacto.confirmacoes = 0;               // ruído isolado: descarta
+  }
 
-  Serial.print("Tentativa ");
-  Serial.print(tentativaAtual);
-
-  Serial.print(" - Maior impacto: ");
-  Serial.println(maiorImpacto);
-
-
-  // Mostra o resultado
-  mostrarPontuacao(maiorImpacto);
-  tempoEstado = millis();
-  estadoJogo = MOSTRANDO_RESULTADO;
+  return impacto.ativo && (agora - impacto.tUltimoAcima >= TEMPO_FIM_IMPACTO);
 }
 
-void setup()
-{
-  Serial.begin(57600);
-  Serial.println();
-  Serial.println("=================================");
-  Serial.println("     MEDIDOR DE IMPACTO FSR");
-  Serial.println("=================================");
+// ================= TRANSIÇÕES DE ESTADO =====================
+
+void entrarEstado(Estado novo) {
+  jogo.estado = novo;
+  jogo.tEstado = millis();
+
+  switch (novo) {
+    case Estado::PREPARANDO:
+      Serial.printf("\n===== TENTATIVA %u/%u =====\n", jogo.tentativa, TOTAL_TENTATIVAS);
+      exibir("Prepare-se %u/%u", jogo.tentativa, TOTAL_TENTATIVAS);
+      break;
+
+    case Estado::MEDINDO:
+      resetarImpacto();
+      Serial.println(">>> SOCO LIBERADO!");
+      exibir("VAI!");
+      break;
+
+    case Estado::MOSTRANDO_RESULTADO: {
+      uint16_t d = jogo.dano[jogo.tentativa - 1];
+      Serial.printf("Tentativa %u - dano: %u\n", jogo.tentativa, d);
+      exibir("Soco %u: %u %u %u", jogo.tentativa, d, d, d);
+      break;
+    }
+
+    case Estado::FINALIZADO:
+      jogo.melhor = 0;
+      for (uint8_t i = 0; i < TOTAL_TENTATIVAS; i++)
+        if (jogo.dano[i] > jogo.melhor) jogo.melhor = jogo.dano[i];
+
+      Serial.println("\n========= FIM DO JOGO =========");
+      for (uint8_t i = 0; i < TOTAL_TENTATIVAS; i++)
+        Serial.printf("Tentativa %u: %u\n", i + 1, jogo.dano[i]);
+      Serial.printf("MAIOR DANO: %u\n", jogo.melhor);
+      exibir("Melhor: %u", jogo.melhor);
+      break;
+  }
+}
+
+void novaRodada() {
+  memset(jogo.dano, 0, sizeof(jogo.dano));
+  jogo.melhor = 0;
+  jogo.tentativa = 1;
+  entrarEstado(Estado::PREPARANDO);
+}
+
+void registrarSoco(uint16_t dano) {
+  jogo.dano[jogo.tentativa - 1] = dano;
+  entrarEstado(Estado::MOSTRANDO_RESULTADO);
+}
+
+// ===================== MÁQUINA DE ESTADOS ===================
+
+void atualizarJogo() {
+  uint32_t decorrido = millis() - jogo.tEstado;
+
+  switch (jogo.estado) {
+
+    case Estado::PREPARANDO:
+      // FSR ignorado. Só libera quando o tempo passou E o sensor
+      // está em repouso (evita contar pressão residual/encostada).
+      if (decorrido >= TEMPO_PREPARACAO && analogRead(SENSOR_PIN) < LIMIAR_IMPACTO)
+        entrarEstado(Estado::MEDINDO);
+      break;
+
+    case Estado::MEDINDO:
+      if (processarSensor()) {
+        registrarSoco(impacto.pico);   // valor bruto do ADC (0-4095)
+      } else if (!impacto.ativo && decorrido >= TEMPO_LIMITE_SOCO) {
+        Serial.println("Tempo esgotado: nenhum soco detectado");
+        registrarSoco(0);
+      }
+      break;
+
+    case Estado::MOSTRANDO_RESULTADO:
+      // FSR não é lido aqui.
+      if (decorrido >= TEMPO_RESULTADO) {
+        if (jogo.tentativa < TOTAL_TENTATIVAS) {
+          jogo.tentativa++;
+          entrarEstado(Estado::PREPARANDO);
+        } else {
+          entrarEstado(Estado::FINALIZADO);
+        }
+      }
+      break;
+
+    case Estado::FINALIZADO:
+      if (botaoPressionado() || decorrido >= TEMPO_REINICIO)
+        novaRodada();
+      break;
+  }
+}
+
+// ======================= SETUP / LOOP =======================
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n=== MEDIDOR DE IMPACTO FSR ===");
+
+  analogReadResolution(12);
+  analogSetPinAttenuation(SENSOR_PIN, ADC_11db);
+  pinMode(BOTAO_PIN, INPUT_PULLUP);
 
   mx.begin();
+  mx.control(MD_MAX72XX::INTENSITY, BRILHO);
   mx.setShiftDataInCallback(scrollDataSource);
   mx.setShiftDataOutCallback(scrollDataSink);
 
-#if USE_POT_CONTROL
-  pinMode(SPEED_IN, INPUT);
-#else
-  scrollDelay = SCROLL_DELAY;
-#endif
-
-  newMessage[0] = '\0';
-
-  iniciarTentativa();
+  novaRodada();
 }
 
-void loop()
-{
-  uint32_t agora = millis();
-
-  // ESTADO: PREPARANDO
-  if (estadoJogo == PREPARANDO)
-  {
-
-    // Durante os 2 segundos de preparação,
-    // o FSR NÃO é considerado.
-    //
-    // Isso evita que a pessoa dê um soco antes da hora.
-
-    if (agora - tempoEstado >= TEMPO_PREPARACAO)
-    {
-      Serial.println(">>> SOC0 LIBERADO!");
-
-      Serial.println("Aguardando impacto...");
-
-      maiorImpacto = 0;
-
-      emImpacto = false;
-
-      estadoJogo = MEDINDO;
-    }
-  }
-
-  // ESTADO: MEDINDO
-  else if (estadoJogo == MEDINDO)
-  {
-
-    // Leitura do FSR
-    int valor = analogRead(SENSOR);
-
-    // Detectou início de impacto
-    if (valor > LIMIAR_IMPACTO)
-    {
-
-      if (!emImpacto)
-      {
-        emImpacto = true;
-
-        maiorImpacto = valor;
-
-        Serial.println(">>> IMPACTO DETECTADO!");
-      }
-
-      // Guarda o maior valor
-      if (valor > maiorImpacto)
-      {
-        maiorImpacto = valor;
-      }
-
-      // Atualiza o momento da última leitura acima do limiar
-      ultimoImpacto = agora;
-    }
-
-    // Verifica se o impacto terminou
-    if (
-      emImpacto &&
-      (agora - ultimoImpacto >= TEMPO_FIM_IMPACTO)
-    )
-    {
-      finalizarImpacto();
-    }
-  }
-
-  // ESTADO: MOSTRANDO RESULTADO
-  else if (estadoJogo == MOSTRANDO_RESULTADO)
-  {
-
-    // Enquanto estiver mostrando o resultado,
-    // o FSR NÃO é lido.
-    //
-    // Portanto, a pessoa não consegue gerar outro ponto
-    // acidentalmente.
-
-    if (agora - tempoEstado >= TEMPO_RESULTADO)
-    {
-
-      // Ainda existem tentativas?
-      if (tentativaAtual < TOTAL_TENTATIVAS)
-      {
-        iniciarTentativa();
-      }
-
-      // Terminou as 3 tentativas
-      else
-      {
-        Serial.println();
-        Serial.println("=================================");
-        Serial.println("          FIM DO JOGO");
-        Serial.println("=================================");
-
-        Serial.print("Tentativa 1: ");
-        Serial.println(pontos[0]);
-
-        Serial.print("Tentativa 2: ");
-        Serial.println(pontos[1]);
-
-        Serial.print("Tentativa 3: ");
-        Serial.println(pontos[2]);
-
-
-        // Mostra os três resultados
-        mostrarTodosPontos();
-
-        estadoJogo = FINALIZADO;
-      }
-    }
-  }
-
-  // ESTADO: FINALIZADO
-  else if (estadoJogo == FINALIZADO)
-  {
-    // Não faz mais leituras do FSR.
-    //
-    // O display continua mostrando os resultados.
-  }
-
-  // DISPLAY
-  scrollDelay = getScrollDelay();
-
-  scrollText();
+void loop() {
+  atualizarJogo();
+  atualizarScroll();
 }
