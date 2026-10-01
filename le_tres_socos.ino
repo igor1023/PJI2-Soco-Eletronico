@@ -158,6 +158,12 @@ void resetarImpacto() {
   impacto = Impacto();
 }
 
+// Converte o valor bruto do ADC (0-4095) para a escala de pontuação (0-255),
+// de forma proporcional. Usa uint32_t na multiplicação para evitar overflow.
+uint8_t converterEscala(uint16_t valorBruto) {
+  return (uint8_t)(((uint32_t)valorBruto * 255) / ADC_MAX);
+}
+
 // Processa uma leitura. Retorna true quando um soco acabou de terminar
 // (o pico fica em impacto.pico).
 bool processarSensor() {
@@ -249,7 +255,7 @@ void atualizarJogo() {
 
     case Estado::MEDINDO:
       if (processarSensor()) {
-        registrarSoco(impacto.pico);   // valor bruto do ADC (0-4095)
+        registrarSoco(converterEscala(impacto.pico));   // pico bruto (0-4095) convertido p/ escala 0-255
       } else if (!impacto.ativo && decorrido >= TEMPO_LIMITE_SOCO) {
         Serial.println("Tempo esgotado: nenhum soco detectado");
         registrarSoco(0);
