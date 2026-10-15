@@ -6,6 +6,7 @@
 
 #include <MD_MAX72xx.h>
 #include <SPI.h>
+#include <SD.h>
 
 // ===================== CONFIGURAÇÕES ========================
 
@@ -26,13 +27,19 @@
 #define TEMPO_FIM_IMPACTO     100   // ms abaixo do limiar => soco terminou
 
 // ---- Jogo ----
-#define TOTAL_TENTATIVAS  3
-#define TEMPO_PREPARACAO  7000      // ms com FSR ignorado (tempo p/ "Prepare-se x/3" rolar inteiro)
+#define TOTAL_TENTATIVAS  1
+#define TEMPO_PREPARACAO  6500      // ms com FSR ignorado (tempo p/ "Prepare-se x/3" rolar inteiro)
 #define TEMPO_LIMITE_SOCO 15000     // ms esperando o soco (senão valor = 0)
-#define TEMPO_RESULTADO   5250      // ms mostrando "Soco i: v v v" (rola inteiro)
-#define TEMPO_REINICIO    30000     // ms no FINALIZADO até reiniciar sozinho
+#define TEMPO_RESULTADO   8000      // ms mostrando "Soco i: v v v" (rola inteiro)
+#define TEMPO_REINICIO    10000     // ms no FINALIZADO até reiniciar sozinho
 #define BOTAO_PIN         27        // botão p/ novo jogo (para GND, pull-up interno)
 #define DEBOUNCE_MS       40
+
+// ---- Cartão SD ----
+// Compartilha o barramento SPI (CLK=18, MOSI=23, MISO=19) com a matriz,
+// cada módulo com seu próprio CS.
+#define CS_PIN_SD   4
+#define ARQUIVO_SD  "/resultados.csv"
 
 // ========================= TIPOS ============================
 
@@ -135,6 +142,29 @@ void atualizarScroll() {
   }
 }
 
+// ======================== CARTÃO SD ==========================
+
+bool sdDisponivel = false;
+
+// Acrescenta uma linha "tentativa n;valor=i" no CSV do cartão SD
+void salvarResultadoSD(uint8_t numTentativas, uint16_t melhorValor) {
+  if (!sdDisponivel) {
+    Serial.println("SD indisponível: resultado não foi salvo.");
+    return;
+  }
+
+  File arquivo = SD.open(ARQUIVO_SD, FILE_APPEND);
+  if (!arquivo) {
+    Serial.println("Falha ao abrir o arquivo no SD.");
+    return;
+  }
+
+  arquivo.printf("tentativa %u;valor=%u\n", numTentativas, melhorValor);
+  arquivo.close();
+
+  Serial.printf("Resultado salvo no SD: tentativa %u;valor=%u\n", numTentativas, melhorValor);
+}
+
 // ======================== BOTÃO =============================
 
 // Retorna true uma única vez por clique (com debounce)
@@ -223,6 +253,8 @@ void entrarEstado(Estado novo) {
         Serial.printf("Tentativa %u: %u\n", i + 1, jogo.dano[i]);
       Serial.printf("MAIOR DANO: %u\n", jogo.melhor);
       exibir("Melhor: %u", jogo.melhor);
+
+      salvarResultadoSD(jogo.tentativa, jogo.melhor);
       break;
   }
 }
@@ -295,6 +327,12 @@ void setup() {
   mx.control(MD_MAX72XX::INTENSITY, BRILHO);
   mx.setShiftDataInCallback(scrollDataSource);
   mx.setShiftDataOutCallback(scrollDataSink);
+
+  sdDisponivel = SD.begin(CS_PIN_SD);
+  if (sdDisponivel)
+    Serial.println("Cartão SD OK.");
+  else
+    Serial.println("Cartão SD não encontrado - resultados não serão salvos.");
 
   novaRodada();
 }
