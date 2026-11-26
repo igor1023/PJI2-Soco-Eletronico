@@ -4,6 +4,7 @@ Repositório da disciplina de Projeto Integrador II para armazenamento de códig
 
 Desenvolvimento de um soco eletrônico a ser implantado na feira de jogos do IFSC câmpus São José.
 
+- Código do Soco Eletrônico é soco_eletronico_final.ino.
 
 # Alunos: Igor da Silva e Tiago Cargnin Morandi.
 # Disciplina: Projeto Integrador II - 129006.
